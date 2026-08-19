@@ -36,6 +36,9 @@ env:
   KOGPT_CKPT_DIR: /ckpt
   HF_DATASETS_CACHE: /data/hf_cache
   HF_HUB_DISABLE_XET: "1"
+  HF_TOKEN:
+    value: KOHFGPTOKEN     # name of the org Secret (not the token itself)
+    secret: true
   OMP_NUM_THREADS: "8"
 
 run:
