@@ -1,13 +1,16 @@
 # ---------------------------------------------------------------------------
 # STEP 2 — Train on 4x RTX 3090 (preset gpu-4) with DDP.
 #
-#   vessl run create -f vessl/run_train.yaml -w
+#   vessl run create -f vessl/run_train.yaml
 #
 # Project #1: Differential Transformer + Multi-Token Prediction (KOGPT_ATTN=diff).
 # For project #2 (GPT-3/Llama/Qwen-style dense), set KOGPT_ATTN=gqa, KOGPT_MTP=1.
 #
-# Resume: /ckpt is a PERSISTENT volume. On the 120h Run cap or a SIGTERM the
-# trainer checkpoints and exits; relaunching this same Run auto-resumes.
+# Persistence (storage volumes can't be run-mounted): at start we DOWNLOAD the
+# tokenizer + .bin from the kogpt-data volume; during training train.py UPLOADS
+# checkpoints (best.pt + rolling latest.pt) to the kogpt-ckpt volume every eval.
+# Relaunch resumes by pulling latest.pt back. Both use the auto-authed
+# `vessl storage copy-file` (run containers are service-account authed).
 # ---------------------------------------------------------------------------
 name: kogpt-diff-medium
 description: 350M Korean Differential Transformer + MTP, from scratch, 4x3090 DDP
@@ -21,28 +24,31 @@ image: quay.io/vessl-ai/torch:2.3.1-cuda12.1-r5
 import:
   /root/koGPT:
     git:
-      url: https://github.com/0n1ac-archive/koGPT   # TODO: your repo
+      url: https://github.com/0n1ac-archive/koGPT
       ref: main
-  /data: volume://vessl-storage/kogpt-data     # tokenizer + .bin from step 1
-  /ckpt: volume://vessl-storage/kogpt-ckpt     # persistent checkpoints (resume)
 
 env:
   KOGPT_LANG: ko
-  KOGPT_SIZE: medium       # warmup | medium | large
-  KOGPT_ATTN: diff         # diff (project #1) | gqa (project #2)
-  KOGPT_MTP: "2"           # predict t+1 and t+2 ; set 1 to disable MTP
+  KOGPT_SIZE: medium
+  KOGPT_ATTN: diff
+  KOGPT_MTP: "2"
   KOGPT_BIN_DIR: /data/bin
   KOGPT_TOK: /data/tok/kogpt_sp
   KOGPT_CKPT_DIR: /ckpt
-  HF_DATASETS_CACHE: /data/hf_cache
-  HF_HUB_DISABLE_XET: "1"
-  HF_TOKEN:
-    value: KOHFGPTOKEN     # name of the org Secret (not the token itself)
-    secret: true
+  KOGPT_CKPT_VOLUME: volume://vessl-storage/kogpt-ckpt
   OMP_NUM_THREADS: "8"
 
 run:
   - workdir: /root/koGPT
     command: |
+      set -e
       pip install -r requirements.txt
+      pip install -q -U vessl        # ensure the `storage` subcommand exists
+      mkdir -p /data/bin /data/tok /ckpt
+      DV=volume://vessl-storage/kogpt-data
+      # download tokenizer + tokenized data (copy-file made nested <name>/<name> keys)
+      vessl storage copy-file $DV/tok/kogpt_sp.model/kogpt_sp.model /data/tok/
+      vessl storage copy-file $DV/bin/val_ko.bin/val_ko.bin         /data/bin/
+      vessl storage copy-file $DV/bin/train_ko.bin/train_ko.bin     /data/bin/
+      ls -la /data/tok /data/bin
       torchrun --standalone --nproc_per_node=4 train.py

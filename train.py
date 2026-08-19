@@ -17,6 +17,7 @@ import glob
 import math
 import time
 import signal
+import subprocess
 
 import numpy as np
 import torch
@@ -29,6 +30,52 @@ from model import GPT                                                          #
 import guard                                                                   # noqa
 
 _STOP = False
+
+# Persist checkpoints to a storage volume (storage volumes can't be run-mounted,
+# so we copy files with the auto-authed `vessl storage copy-file`). Best-effort:
+# a failed upload/download never kills training. Set KOGPT_CKPT_VOLUME to enable.
+CKPT_VOLUME = os.environ.get("KOGPT_CKPT_VOLUME")  # e.g. volume://vessl-storage/kogpt-ckpt
+
+
+def _vol_upload(local_path, as_name=None):
+    """Upload a checkpoint to the volume. `vessl storage copy-file` appends the
+    SOURCE basename to the DEST directory, so to control the remote name we stage
+    the file under that name first (hardlink; no extra disk)."""
+    if not CKPT_VOLUME or not os.path.exists(local_path):
+        return
+    src = local_path
+    if as_name and os.path.basename(local_path) != as_name:
+        src = os.path.join(os.path.dirname(local_path) or ".", as_name)
+        try:
+            if os.path.exists(src):
+                os.remove(src)
+            os.link(local_path, src)
+        except OSError:
+            import shutil
+            shutil.copy2(local_path, src)
+    try:
+        subprocess.run(["vessl", "storage", "copy-file", src, CKPT_VOLUME],
+                       check=True, capture_output=True, timeout=3600)   # DEST = dir
+        print(f"[train] uploaded {os.path.basename(src)} to volume", flush=True)
+    except Exception as e:  # noqa
+        print(f"[train] volume upload failed ({os.path.basename(src)}): {e}", flush=True)
+
+
+def _vol_download_resume(ckpt_dir):
+    """Pull latest.pt from the volume into ckpt_dir/latest.pt. Returns path or None."""
+    if not CKPT_VOLUME:
+        return None
+    try:
+        r = subprocess.run(["vessl", "storage", "copy-file",
+                            f"{CKPT_VOLUME}/latest.pt", ckpt_dir + "/"],  # DEST = dir
+                           capture_output=True, timeout=3600)
+        dst = os.path.join(ckpt_dir, "latest.pt")
+        if r.returncode == 0 and os.path.exists(dst):
+            print("[train] downloaded latest.pt from volume", flush=True)
+            return dst
+    except Exception as e:  # noqa
+        print(f"[train] no volume resume available ({e})", flush=True)
+    return None
 
 
 def _handle_sigterm(signum, frame):
@@ -149,19 +196,31 @@ def main():
     optimizer = model.configure_optimizers(
         tcfg.weight_decay, tcfg.lr, (tcfg.beta1, tcfg.beta2), "cuda")
 
-    # --- resume ---
+    # --- resume (prefer a local checkpoint; else pull latest.pt from volume) ---
     os.makedirs(tcfg.ckpt_dir, exist_ok=True)
     step, best_val = 0, float("inf")
+    if is_master and not find_latest_ckpt(tcfg.ckpt_dir):
+        _vol_download_resume(tcfg.ckpt_dir)   # single shared FS across ranks (1 node)
+    if ddp:
+        dist.barrier()
     latest = find_latest_ckpt(tcfg.ckpt_dir)
+    if latest is None:
+        resume_pt = os.path.join(tcfg.ckpt_dir, "latest.pt")
+        latest = resume_pt if os.path.exists(resume_pt) else None
     if latest:
-        ck = torch.load(latest, map_location=device)
-        model.load_state_dict(ck["model"])
-        optimizer.load_state_dict(ck["optimizer"])
-        step, best_val = ck["step"], ck.get("best_val", float("inf"))
-        if "torch_rng" in ck:
-            torch.set_rng_state(ck["torch_rng"].cpu())
-        if is_master:
-            print(f"[train] resumed from {latest} at step {step}", flush=True)
+        try:
+            ck = torch.load(latest, map_location=device)
+            model.load_state_dict(ck["model"])
+            optimizer.load_state_dict(ck["optimizer"])
+            step, best_val = ck["step"], ck.get("best_val", float("inf"))
+            if "torch_rng" in ck:
+                torch.set_rng_state(ck["torch_rng"].cpu())
+            if is_master:
+                print(f"[train] resumed from {latest} at step {step}", flush=True)
+        except Exception as e:  # noqa  (corrupt/incompatible ckpt -> start fresh)
+            step, best_val = 0, float("inf")
+            if is_master:
+                print(f"[train] could not load {latest} ({e}); starting fresh", flush=True)
 
     if tcfg.compile:
         try:
@@ -210,12 +269,14 @@ def main():
                 print(f"[train] step {step} | val loss {val:.4f} | ppl {math.exp(val):.1f}",
                       flush=True)
                 if guard.ensure_space(tcfg.ckpt_dir, tcfg.min_free_gb, tcfg.min_free_inodes):
-                    save_ckpt(os.path.join(tcfg.ckpt_dir, f"step_{step}.pt"),
-                              raw_model, optimizer, step, best_val, mcfg, is_master)
+                    step_path = os.path.join(tcfg.ckpt_dir, f"step_{step}.pt")
+                    save_ckpt(step_path, raw_model, optimizer, step, best_val, mcfg, is_master)
+                    _vol_upload(step_path, "latest.pt")   # rolling resume point on volume
                     if val < best_val:
                         best_val = val
-                        save_ckpt(os.path.join(tcfg.ckpt_dir, "best.pt"),
-                                  raw_model, optimizer, step, best_val, mcfg, is_master)
+                        best_path = os.path.join(tcfg.ckpt_dir, "best.pt")
+                        save_ckpt(best_path, raw_model, optimizer, step, best_val, mcfg, is_master)
+                        _vol_upload(best_path, "best.pt")  # best model, persisted
                     guard.rotate_checkpoints(tcfg.ckpt_dir, tcfg.keep_last)
                 else:
                     guard.purge_hf_cache(dcfg.hf_cache)
@@ -223,10 +284,11 @@ def main():
                 dist.barrier()
         step += 1
 
-    # final save (also runs on SIGTERM path)
+    # final save (also runs on SIGTERM path) — upload so a relaunch can resume
     if is_master:
-        save_ckpt(os.path.join(tcfg.ckpt_dir, f"step_{step}.pt"),
-                  raw_model, optimizer, step, best_val, mcfg, is_master)
+        final_path = os.path.join(tcfg.ckpt_dir, f"step_{step}.pt")
+        save_ckpt(final_path, raw_model, optimizer, step, best_val, mcfg, is_master)
+        _vol_upload(final_path, "latest.pt")
         print(f"[train] stopped at step {step} (STOP={_STOP})", flush=True)
     if ddp:
         dist.destroy_process_group()
