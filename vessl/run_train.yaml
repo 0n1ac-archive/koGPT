@@ -44,11 +44,12 @@ run:
       set -e
       pip install -r requirements.txt
       pip install -q -U vessl        # ensure the `storage` subcommand exists
+      # The CLI synchronously posts usage telemetry without a timeout.  On the
+      # training network that can block every `storage copy-file` indefinitely.
+      export VESSL_DATA_COLLECTION_OPT_OUT=true
       mkdir -p /data/bin /data/tok /ckpt
-      DV=volume://vessl-storage/kogpt-data
-      # download tokenizer + tokenized data (copy-file made nested <name>/<name> keys)
-      vessl storage copy-file $DV/tok/kogpt_sp.model/kogpt_sp.model /data/tok/
-      vessl storage copy-file $DV/bin/val_ko.bin/val_ko.bin         /data/bin/
-      vessl storage copy-file $DV/bin/train_ko.bin/train_ko.bin     /data/bin/
+      # `vessl storage copy-file` ignores a file path and downloads the entire
+      # volume. Fetch the three required objects directly instead.
+      python -c "import base64; exec(base64.b64decode('aW1wb3J0IG9zCmltcG9ydCB0aW1lCmZyb20gdmVzc2wuc3RvcmFnZS5maWxlIGltcG9ydCBWb2x1bWVGaWxlCmZyb20gdmVzc2wuc3RvcmFnZS52b2x1bWVfdjIgaW1wb3J0IF9nZXRfdm9sdW1lX3dpdGhfZmVkZXJhdGUKCmRlZiBwcm9ncmVzcyhsYWJlbCk6CiAgICBsYXN0ID0gWzAuMF0KICAgIGRlZiB1cGRhdGUoZG9uZSk6CiAgICAgICAgbm93ID0gdGltZS5tb25vdG9uaWMoKQogICAgICAgIGlmIG5vdyAtIGxhc3RbMF0gPj0gNToKICAgICAgICAgICAgcHJpbnQoZiJEb3dubG9hZGluZyB7bGFiZWx9OiB7ZG9uZSAvIDIqKjMwOi4yZn0gR2lCIiwgZmx1c2g9VHJ1ZSkKICAgICAgICAgICAgbGFzdFswXSA9IG5vdwogICAgcmV0dXJuIHVwZGF0ZQoKdm9sdW1lID0gX2dldF92b2x1bWVfd2l0aF9mZWRlcmF0ZSgidmVzc2wtc3RvcmFnZSIsICJrb2dwdC1kYXRhIiwgInJlYWQiKQpmaWxlcyA9ICgKICAgICgidG9rL2tvZ3B0X3NwLm1vZGVsL2tvZ3B0X3NwLm1vZGVsIiwgIi9kYXRhL3Rvay9rb2dwdF9zcC5tb2RlbCIpLAogICAgKCJiaW4vdmFsX2tvLmJpbi92YWxfa28uYmluIiwgIi9kYXRhL2Jpbi92YWxfa28uYmluIiksCiAgICAoImJpbi90cmFpbl9rby5iaW4vdHJhaW5fa28uYmluIiwgIi9kYXRhL2Jpbi90cmFpbl9rby5iaW4iKSwKKQpmb3IgcmVtb3RlLCBsb2NhbCBpbiBmaWxlczoKICAgIG9zLm1ha2VkaXJzKG9zLnBhdGguZGlybmFtZShsb2NhbCksIGV4aXN0X29rPVRydWUpCiAgICBwcmludChmIkRvd25sb2FkaW5nIHtyZW1vdGV9IC0+IHtsb2NhbH0iLCBmbHVzaD1UcnVlKQogICAgdm9sdW1lLmRvd25sb2FkX2ZpbGUoVm9sdW1lRmlsZShwYXRoPXJlbW90ZSwgc2l6ZT0wKSwgbG9jYWwsIHByb2dyZXNzKHJlbW90ZSkpCg=='))"
       ls -la /data/tok /data/bin
       torchrun --standalone --nproc_per_node=4 train.py

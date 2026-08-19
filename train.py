@@ -17,7 +17,8 @@ import glob
 import math
 import time
 import signal
-import subprocess
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 
 import numpy as np
 import torch
@@ -31,34 +32,38 @@ import guard                                                                   #
 
 _STOP = False
 
-# Persist checkpoints to a storage volume (storage volumes can't be run-mounted,
-# so we copy files with the auto-authed `vessl storage copy-file`). Best-effort:
-# a failed upload/download never kills training. Set KOGPT_CKPT_VOLUME to enable.
+# Storage volumes cannot be mounted in a Run. Checkpoints are transferred through
+# VESSL's federated storage API; uploads run in a single background worker so DDP
+# ranks never wait at a collective while a multi-GB file is transferred.
 CKPT_VOLUME = os.environ.get("KOGPT_CKPT_VOLUME")  # e.g. volume://vessl-storage/kogpt-ckpt
+_UPLOAD_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ckpt-upload")
+_UPLOAD_FUTURES = []
+
+
+def _volume(mode):
+    """Return the VESSL storage-volume client for the configured checkpoint volume."""
+    from vessl.storage.volume_v2 import _get_volume_with_federate
+    from vessl.volume import parse_volume_url
+
+    ref = parse_volume_url(CKPT_VOLUME)
+    return _get_volume_with_federate(ref.storage_name, ref.volume_name, mode)
 
 
 def _vol_upload(local_path, as_name=None):
-    """Upload a checkpoint to the volume. `vessl storage copy-file` appends the
-    SOURCE basename to the DEST directory, so to control the remote name we stage
-    the file under that name first (hardlink; no extra disk)."""
+    """Queue a checkpoint upload without blocking distributed training ranks."""
     if not CKPT_VOLUME or not os.path.exists(local_path):
         return
-    src = local_path
-    if as_name and os.path.basename(local_path) != as_name:
-        src = os.path.join(os.path.dirname(local_path) or ".", as_name)
+    remote_name = as_name or os.path.basename(local_path)
+
+    def upload():
         try:
-            if os.path.exists(src):
-                os.remove(src)
-            os.link(local_path, src)
-        except OSError:
-            import shutil
-            shutil.copy2(local_path, src)
-    try:
-        subprocess.run(["vessl", "storage", "copy-file", src, CKPT_VOLUME],
-                       check=True, capture_output=True, timeout=3600)   # DEST = dir
-        print(f"[train] uploaded {os.path.basename(src)} to volume", flush=True)
-    except Exception as e:  # noqa
-        print(f"[train] volume upload failed ({os.path.basename(src)}): {e}", flush=True)
+            _volume("write").upload_file(local_path, remote_name)
+            print(f"[train] uploaded {remote_name} to volume", flush=True)
+        except Exception as e:  # noqa
+            print(f"[train] volume upload failed ({remote_name}): {e}", flush=True)
+
+    _UPLOAD_FUTURES.append(_UPLOAD_POOL.submit(upload))
+    print(f"[train] queued {remote_name} upload", flush=True)
 
 
 def _vol_download_resume(ckpt_dir):
@@ -66,16 +71,23 @@ def _vol_download_resume(ckpt_dir):
     if not CKPT_VOLUME:
         return None
     try:
-        r = subprocess.run(["vessl", "storage", "copy-file",
-                            f"{CKPT_VOLUME}/latest.pt", ckpt_dir + "/"],  # DEST = dir
-                           capture_output=True, timeout=3600)
         dst = os.path.join(ckpt_dir, "latest.pt")
-        if r.returncode == 0 and os.path.exists(dst):
-            print("[train] downloaded latest.pt from volume", flush=True)
-            return dst
+        from vessl.storage.file import VolumeFile
+
+        _volume("read").download_file(VolumeFile(path="latest.pt", size=0), dst)
+        print("[train] downloaded latest.pt from volume", flush=True)
+        return dst
     except Exception as e:  # noqa
         print(f"[train] no volume resume available ({e})", flush=True)
     return None
+
+
+def _wait_for_uploads():
+    """Drain queued uploads before the rank-0 process exits."""
+    if _UPLOAD_FUTURES:
+        print("[train] waiting for checkpoint uploads", flush=True)
+    for future in _UPLOAD_FUTURES:
+        future.result()
 
 
 def _handle_sigterm(signum, frame):
@@ -154,7 +166,9 @@ def main():
     # --- DDP setup ---
     ddp = is_ddp()
     if ddp:
-        dist.init_process_group(backend="nccl")
+        # Rank 0 may evaluate or restore a multi-GB checkpoint while other
+        # ranks wait at a barrier. Keep the watchdog well above storage delays.
+        dist.init_process_group(backend="nccl", timeout=timedelta(hours=2))
         rank = int(os.environ["RANK"])
         local_rank = int(os.environ["LOCAL_RANK"])
         world = int(os.environ["WORLD_SIZE"])
@@ -289,6 +303,7 @@ def main():
         final_path = os.path.join(tcfg.ckpt_dir, f"step_{step}.pt")
         save_ckpt(final_path, raw_model, optimizer, step, best_val, mcfg, is_master)
         _vol_upload(final_path, "latest.pt")
+        _wait_for_uploads()
         print(f"[train] stopped at step {step} (STOP={_STOP})", flush=True)
     if ddp:
         dist.destroy_process_group()
