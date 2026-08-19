@@ -1,45 +1,52 @@
 # ---------------------------------------------------------------------------
-# STEP 1 — Tokenizer + data prep (CPU-bound; do NOT waste 4 GPUs here).
-# Streams FineWeb-2 Korean, trains the SentencePiece tokenizer, and writes
-# train/val .bin into a PERSISTENT volume so the training Run can reuse them.
+# STEP 1 — Tokenizer + data prep (CPU-bound; gpu-1 is enough).
+# Streams FineWeb-2 KO + Wikisource, trains the tokenizer, writes train/val .bin
+# to LOCAL /output, then uploads them to the kogpt-data storage volume with
+# `vessl storage copy-file` (run containers are auto-authed as service-account).
 #
-#   vessl run create -f vessl/run_prepare.yaml -w
+# NOTE: storage volumes (volume://) CANNOT be mounted in a Run — import/mount
+# both fail or don't persist. copy-file from inside the container is the way.
 #
-# One-time volume creation (safe, no GPU) — run these first:
-#   vessl storage create-volume kogpt-data --storage-name vessl-storage
-#   vessl storage create-volume kogpt-ckpt --storage-name vessl-storage
-# If the volume:// mount syntax below is rejected, mount the same volume via
-# the web "New run" editor's "..." dialog on the /data folder (see manual p.19).
+#   vessl run create -f vessl/run_prepare.yaml
 # ---------------------------------------------------------------------------
 name: kogpt-prepare
-description: Train KO tokenizer + tokenize FineWeb-2 into train/val .bin
+description: Train KO tokenizer + tokenize into train/val .bin, upload to volume
 
 resources:
   cluster: yonsei-ai-gpu
-  preset: gpu-1            # tokenize is CPU work; 1 GPU is plenty
+  preset: gpu-1
 
 image: quay.io/vessl-ai/torch:2.3.1-cuda12.1-r5
 
 import:
   /root/koGPT:
     git:
-      url: https://github.com/0n1ac-archive/koGPT   # TODO: your repo (manual: Github 연동)
+      url: https://github.com/0n1ac-archive/koGPT
       ref: main
-  /data: volume://vessl-storage/kogpt-data     # persistent; shared with training
 
 env:
-  KOGPT_LANG: ko           # flip to "en" for the FineWeb-Edu fallback
-  KOGPT_BIN_DIR: /data/bin
-  KOGPT_TOK: /data/tok/kogpt_sp
-  HF_DATASETS_CACHE: /data/hf_cache
+  KOGPT_LANG: ko
+  KOGPT_BIN_DIR: /output/bin       # local (ephemeral) during the run
+  KOGPT_TOK: /output/tok/kogpt_sp
+  HF_DATASETS_CACHE: /output/hf_cache
   HF_HUB_DISABLE_XET: "1"
-  HF_TOKEN:                # higher HF rate limits / faster streaming
-    value: KOHFGPTOKEN     # name of the org Secret (not the token itself)
+  KOGPT_DATA_VOLUME: volume://vessl-storage/kogpt-data
+  HF_TOKEN:
+    value: KOHFGPTOKEN             # org Secret name (not the token itself)
     secret: true
 
 run:
   - workdir: /root/koGPT
     command: |
+      set -e
       pip install -r requirements.txt
+      pip install -q -U vessl        # ensure the `storage` subcommand exists
       python tokenizer/train_tokenizer.py
+      # persist the tokenizer immediately (cheap insurance before the long build)
+      vessl storage copy-file /output/tok/kogpt_sp.model $KOGPT_DATA_VOLUME/tok/kogpt_sp.model
+      vessl storage copy-file /output/tok/kogpt_sp.vocab $KOGPT_DATA_VOLUME/tok/kogpt_sp.vocab
       python data/prepare.py
+      # persist the tokenized data to the volume
+      vessl storage copy-file /output/bin/val_ko.bin   $KOGPT_DATA_VOLUME/bin/val_ko.bin
+      vessl storage copy-file /output/bin/train_ko.bin $KOGPT_DATA_VOLUME/bin/train_ko.bin
+      echo KOGPT_PREPARE_PERSISTED
