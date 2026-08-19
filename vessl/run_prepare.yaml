@@ -32,6 +32,7 @@ env:
   KOGPT_BIN_DIR: /data/bin
   KOGPT_TOK: /data/tok/kogpt_sp
   HF_DATASETS_CACHE: /data/hf_cache
+  HF_HUB_DISABLE_XET: "1"
 
 run:
   - workdir: /root/koGPT

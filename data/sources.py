@@ -5,7 +5,13 @@ For Korean we blend a large modern web corpus with a small, up-weighted stream
 of PUBLIC-DOMAIN literature (Korean Wikisource: 근대 소설/시/고전) so the model
 picks up some literary/narrative 문체 without touching copyrighted web novels.
 """
+import os
 import unicodedata
+
+# hf_xet's background threads can crash at interpreter shutdown
+# (PyGILState_Release / core dump). Force the classic HTTP downloader instead.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from data.filters import keep_document
 

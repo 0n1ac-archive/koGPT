@@ -7,6 +7,17 @@ from dataclasses import dataclass, field, asdict
 import os
 
 
+def _envi(name, default):
+    """int env override (accepts 2e6-style floats too); falls back to default."""
+    v = os.environ.get(name)
+    return int(float(v)) if v is not None else default
+
+
+def _envb(name, default):
+    v = os.environ.get(name)
+    return v not in ("0", "false", "False") if v is not None else default
+
+
 # ----------------------------------------------------------------------------
 # Language / data source. Flip LANG to "en" for the FineWeb-Edu fallback.
 # ----------------------------------------------------------------------------
@@ -50,6 +61,8 @@ class DataConfig:
 
     def __post_init__(self):
         self.sources = _DATA[self.lang]     # list of weighted streaming sources
+        self.target_tokens = _envi("KOGPT_TARGET_TOKENS", self.target_tokens)
+        self.val_tokens = _envi("KOGPT_VAL_TOKENS", self.val_tokens)
 
     @property
     def train_bin(self):
@@ -68,6 +81,10 @@ class TokenizerConfig:
     character_coverage: float = 0.9995    # high coverage for Hangul
     model_type: str = "bpe"
     byte_fallback: bool = True            # no OOV, robust to rare chars
+
+    def __post_init__(self):
+        self.sample_bytes = _envi("KOGPT_TOK_SAMPLE_BYTES", self.sample_bytes)
+        self.vocab_size = _envi("KOGPT_VOCAB", self.vocab_size)
 
     @property
     def model_file(self):
@@ -149,6 +166,15 @@ class TrainConfig:
     dtype: str = "bfloat16"
     compile: bool = True
     seed: int = 1337
+
+    def __post_init__(self):
+        # env overrides for quick smoke runs (KOGPT_MAX_STEPS=30 etc.)
+        self.max_steps = _envi("KOGPT_MAX_STEPS", self.max_steps)
+        self.eval_every = _envi("KOGPT_EVAL_EVERY", self.eval_every)
+        self.ckpt_every = _envi("KOGPT_CKPT_EVERY", self.ckpt_every)
+        self.micro_bsz = _envi("KOGPT_MICRO_BSZ", self.micro_bsz)
+        self.grad_accum = _envi("KOGPT_GRAD_ACCUM", self.grad_accum)
+        self.compile = _envb("KOGPT_COMPILE", self.compile)
 
 
 def all_configs():

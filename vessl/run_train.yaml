@@ -35,6 +35,7 @@ env:
   KOGPT_TOK: /data/tok/kogpt_sp
   KOGPT_CKPT_DIR: /ckpt
   HF_DATASETS_CACHE: /data/hf_cache
+  HF_HUB_DISABLE_XET: "1"
   OMP_NUM_THREADS: "8"
 
 run:
