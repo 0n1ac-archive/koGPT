@@ -25,8 +25,10 @@ def build_mixture(dc, seed=42):
         ds = load_dataset(src["hf_path"], name=src["hf_name"],
                           split=src["split"], streaming=True)
         ds = ds.map(_normalize_map(src["text_key"], src["min_hangul_ratio"],
-                                   src["min_chars"]),
-                    remove_columns=list(ds.column_names or []))
+                                   src["min_chars"]))
+        # force a uniform 3-column schema so interleave_datasets won't choke on
+        # heterogeneous source features (robust across datasets streaming versions)
+        ds = ds.select_columns(["text", "_mhr", "_minc"])
         dss.append(ds)
         probs.append(src["weight"])
     if len(dss) == 1:
