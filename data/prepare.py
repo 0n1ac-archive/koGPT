@@ -40,42 +40,62 @@ def _encode(text):
     return ids
 
 
-def _write_split(name, out_path, n_tokens, doc_iter, pool, dc, tc):
-    """Tokenize from doc_iter until n_tokens written to out_path. Returns written."""
-    print(f"[prep] writing {name}: target {n_tokens/1e9:.2f}B tokens -> {out_path}",
-          flush=True)
-    written = 0
-    last_guard = time.time()
-    buf = array.array("H")  # unsigned short = uint16
-    with open(out_path, "wb") as f:
-        for ids in pool.imap(_encode, doc_iter, chunksize=64):
-            buf.extend(ids)
-            if len(buf) >= 1_000_000:
-                np.frombuffer(buf, dtype=np.uint16).tofile(f)
-                written += len(buf)
-                buf = array.array("H")
-                if written % 20_000_000 < 1_000_000:
-                    print(f"[prep]   {name}: {written/1e6:.0f}M tokens", flush=True)
-            if written >= n_tokens:
-                break
-            # periodic disk/inode guard
-            if time.time() - last_guard > 30:
-                last_guard = time.time()
-                if not guard.ensure_space(dc.bin_dir, tc_min_gb, tc_min_inodes):
-                    print(f"[prep] aborting {name} early to stay within disk/inodes",
-                          flush=True)
-                    break
-        if len(buf):
-            np.frombuffer(buf, dtype=np.uint16).tofile(f)
-            written += len(buf)
-    print(f"[prep] {name} done: {written/1e6:.1f}M tokens ({written*2/1e9:.2f}GB)",
-          flush=True)
-    return written
-
-
 # guard thresholds (kept loose here; training uses TrainConfig's tighter ones)
 tc_min_gb = 3.0
 tc_min_inodes = 200_000
+
+
+def _write_all(splits, docs, pool, dc):
+    """Write every split in ONE continuous imap pass over `docs`.
+
+    We deliberately consume a single generator through a single imap call — the
+    val split is filled first, then we roll straight into train WITHOUT breaking
+    and restarting imap (a second imap over the same streaming generator would
+    deadlock against the first call's still-running feeder thread).
+    """
+    idx = 0
+    name, path, n_tokens = splits[idx]
+    print(f"[prep] writing {name}: target {n_tokens/1e6:.1f}M tokens -> {path}", flush=True)
+    f = open(path, "wb")
+    written, last_print, last_guard = 0, 0, time.time()
+    buf = array.array("H")  # uint16
+
+    def flush():
+        nonlocal written
+        if buf:
+            np.frombuffer(buf, dtype=np.uint16).tofile(f)
+            written += len(buf)
+            del buf[:]
+
+    for ids in pool.imap(_encode, docs, chunksize=64):
+        buf.extend(ids)
+        if len(buf) >= 1_000_000:
+            flush()
+            if written - last_print >= 5_000_000:
+                print(f"[prep]   {name}: {written/1e6:.0f}M tokens", flush=True)
+                last_print = written
+        # advance to the next split(s) once the current target is met
+        while written >= n_tokens:
+            f.close()
+            print(f"[prep] {name} done: {written/1e6:.1f}M tokens "
+                  f"({written*2/1e9:.2f}GB)", flush=True)
+            idx += 1
+            if idx >= len(splits):
+                return
+            name, path, n_tokens = splits[idx]
+            print(f"[prep] writing {name}: target {n_tokens/1e6:.1f}M tokens -> {path}",
+                  flush=True)
+            f = open(path, "wb")
+            written, last_print = 0, 0
+        if time.time() - last_guard > 30:
+            last_guard = time.time()
+            if not guard.ensure_space(dc.bin_dir, tc_min_gb, tc_min_inodes):
+                print("[prep] low disk/inodes — stopping early (files usable)", flush=True)
+                flush()
+                f.close()
+                return
+    flush()
+    f.close()
 
 
 def main():
@@ -94,11 +114,12 @@ def main():
         return
 
     docs = iter_documents(dc)
+    # val first so it always exists even if train is cut short
+    splits = [("val", dc.val_bin, dc.val_tokens),
+              ("train", dc.train_bin, dc.target_tokens)]
     with mp.Pool(processes=max(2, (os.cpu_count() or 4) - 1),
                  initializer=_init_worker, initargs=(tc.model_file,)) as pool:
-        # val first so it always exists even if train is cut short
-        _write_split("val", dc.val_bin, dc.val_tokens, docs, pool, dc, tc)
-        _write_split("train", dc.train_bin, dc.target_tokens, docs, pool, dc, tc)
+        _write_all(splits, docs, pool, dc)
 
     guard.purge_hf_cache(dc.hf_cache)
     print("[prep] all done.", flush=True)
