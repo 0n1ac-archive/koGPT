@@ -21,7 +21,7 @@ image: quay.io/vessl-ai/torch:2.3.1-cuda12.1-r5
 import:
   /root/koGPT:
     git:
-      url: https://github.com/OHYUNSEO/koGPT   # TODO: your repo
+      url: https://github.com/0n1ac-archive/koGPT   # TODO: your repo
       ref: main
   /data: volume://vessl-storage/kogpt-data     # tokenizer + .bin from step 1
   /ckpt: volume://vessl-storage/kogpt-ckpt     # persistent checkpoints (resume)

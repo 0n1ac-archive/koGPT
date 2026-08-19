@@ -12,23 +12,28 @@ import os
 # ----------------------------------------------------------------------------
 LANG = os.environ.get("KOGPT_LANG", "ko")
 
+def _src(hf_path, hf_name, weight, split="train", text_key="text",
+         min_hangul_ratio=0.30, min_chars=200):
+    return dict(hf_path=hf_path, hf_name=hf_name, split=split, text_key=text_key,
+                weight=weight, min_hangul_ratio=min_hangul_ratio, min_chars=min_chars)
+
+
+# Weighted streaming mixtures. All sources are ALREADY cleaned/deduped or
+# public-domain, so we need no separate offline cleaning pass.
 _DATA = {
-    # HuggingFace streaming datasets that are ALREADY cleaned/deduped,
-    # so we need no separate cleaning pass.
-    "ko": dict(
-        hf_path="HuggingFaceFW/fineweb-2",
-        hf_name="kor_Hang",          # Korean (Hangul) subset of FineWeb-2
-        hf_split="train",
-        text_key="text",
-        min_hangul_ratio=0.30,       # inline filter, no offline cleaning
-    ),
-    "en": dict(
-        hf_path="HuggingFaceFW/fineweb-edu",
-        hf_name="sample-10BT",
-        hf_split="train",
-        text_key="text",
-        min_hangul_ratio=0.0,        # disabled for English
-    ),
+    "ko": [
+        # bulk: modern Korean web text (cleaned/deduped by HF)
+        _src("HuggingFaceFW/fineweb-2", "kor_Hang", weight=0.93),
+        # up-weighted: PUBLIC-DOMAIN Korean literature (근대 소설/시/고전) for
+        # narrative/literary 문체. Small corpus, so it cycles to fill its share.
+        # min_chars lowered so short poems survive the filter.
+        _src("wikimedia/wikisource", "20231201.ko", weight=0.07, min_chars=100),
+        # To add AI Hub 문학/도서 later, append another _src(...) here.
+    ],
+    "en": [
+        _src("HuggingFaceFW/fineweb-edu", "sample-10BT", weight=1.0,
+             min_hangul_ratio=0.0),   # Hangul filter disabled for English
+    ],
 }
 
 
@@ -44,12 +49,7 @@ class DataConfig:
     seq_len: int = 1024
 
     def __post_init__(self):
-        d = _DATA[self.lang]
-        self.hf_path = d["hf_path"]
-        self.hf_name = d["hf_name"]
-        self.hf_split = d["hf_split"]
-        self.text_key = d["text_key"]
-        self.min_hangul_ratio = d["min_hangul_ratio"]
+        self.sources = _DATA[self.lang]     # list of weighted streaming sources
 
     @property
     def train_bin(self):

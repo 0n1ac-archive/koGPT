@@ -15,14 +15,13 @@ import os
 import sys
 import time
 import array
-import unicodedata
 import multiprocessing as mp
 
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import DataConfig, TokenizerConfig  # noqa: E402
-from data.filters import keep_document           # noqa: E402
+from data.sources import iter_documents          # noqa: E402
 import guard                                      # noqa: E402
 
 _SP = None
@@ -39,18 +38,6 @@ def _encode(text):
     ids = _SP.encode(text, out_type=int)
     ids.append(_EOS)
     return ids
-
-
-def _doc_stream(dc):
-    from datasets import load_dataset
-    ds = load_dataset(dc.hf_path, name=dc.hf_name, split=dc.hf_split, streaming=True)
-    for ex in ds:
-        text = ex.get(dc.text_key, "")
-        if not text:
-            continue
-        text = unicodedata.normalize("NFC", text)
-        if keep_document(text, dc.min_hangul_ratio):
-            yield text
 
 
 def _write_split(name, out_path, n_tokens, doc_iter, pool, dc, tc):
@@ -106,7 +93,7 @@ def main():
               flush=True)
         return
 
-    docs = _doc_stream(dc)
+    docs = iter_documents(dc)
     with mp.Pool(processes=max(2, (os.cpu_count() or 4) - 1),
                  initializer=_init_worker, initargs=(tc.model_file,)) as pool:
         # val first so it always exists even if train is cut short

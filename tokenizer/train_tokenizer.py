@@ -14,11 +14,10 @@ Run inside the Vessl environment:
 """
 import os
 import sys
-import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import DataConfig, TokenizerConfig  # noqa: E402
-from data.filters import hangul_ratio            # noqa: E402
+from data.sources import iter_documents          # noqa: E402
 
 
 def main():
@@ -29,22 +28,15 @@ def main():
     os.environ.setdefault("HF_DATASETS_CACHE", dc.hf_cache)
 
     import sentencepiece as spm
-    from datasets import load_dataset
 
     sample_path = tc.model_prefix + ".sample.txt"   # single file -> inode-safe
-    print(f"[tok] streaming up to {tc.sample_bytes/1e9:.1f}GB from "
-          f"{dc.hf_path}:{dc.hf_name} for tokenizer training", flush=True)
+    srcs = ", ".join(f"{s['hf_path']}:{s['hf_name']}" for s in dc.sources)
+    print(f"[tok] streaming up to {tc.sample_bytes/1e9:.1f}GB from mixture "
+          f"[{srcs}] for tokenizer training", flush=True)
 
-    ds = load_dataset(dc.hf_path, name=dc.hf_name, split=dc.hf_split, streaming=True)
     written = 0
     with open(sample_path, "w", encoding="utf-8") as f:
-        for ex in ds:
-            text = ex.get(dc.text_key, "")
-            if not text:
-                continue
-            text = unicodedata.normalize("NFC", text)
-            if dc.min_hangul_ratio > 0 and hangul_ratio(text) < dc.min_hangul_ratio:
-                continue
+        for text in iter_documents(dc):            # same weighted mixture as prepare.py
             f.write(text.replace("\n", " ") + "\n")
             written += len(text.encode("utf-8"))
             if written >= tc.sample_bytes:

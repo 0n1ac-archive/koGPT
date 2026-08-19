@@ -27,7 +27,22 @@ The biggest lever is the **tokenizer**, not the architecture:
   text, so Hangul is segmented into subwords instead of ~3 bytes/char. This
   roughly halves tokens/sentence → ~2× effective data & context per FLOP.
 - **NFC** normalization + an inline **Hangul-ratio filter** (no offline cleaning).
-- Data is **FineWeb-2 Korean (`kor_Hang`)** — already cleaned/deduped by HF.
+
+## Data mixture (`config.py` → `_DATA`)
+A weighted **streaming** mixture (no local downloads, no offline cleaning):
+| source | weight | what |
+|--------|--------|------|
+| `HuggingFaceFW/fineweb-2` `kor_Hang` | 0.93 | modern Korean web text, cleaned/deduped by HF |
+| `wikimedia/wikisource` `20231201.ko` | 0.07 | **public-domain** Korean literature (근대 소설/시/고전) for literary 문체 |
+
+The literature stream is small, so it **cycles** (`interleave_datasets`,
+`all_exhausted`) to actually reach its 7% share and imprint narrative style.
+
+> **On web novels:** modern Korean web novels (판타지/로맨스 등) are copyrighted
+> commercial works with no clean/licensed dataset — scraping them would infringe,
+> so they're intentionally **not** included. Public-domain classic literature
+> (Wikisource) is the licensable way to nudge toward a "novel" 문체. If you have
+> **AI Hub 문학/도서** access, add it as another `_src(...)` for a bigger literary mix.
 
 ## Model sizes (`KOGPT_SIZE`), diff variant, verified param counts
 | size | non-emb params | ~tokens | ~wall-clock on 4×3090 |
