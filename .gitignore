@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.bin
+*.model
+*.vocab
+*.sample.txt
+ckpt/
+data/bin/
+*.pt
+.DS_Store

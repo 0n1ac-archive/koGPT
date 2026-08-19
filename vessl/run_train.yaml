@@ -1,0 +1,44 @@
+# ---------------------------------------------------------------------------
+# STEP 2 — Train on 4x RTX 3090 (preset gpu-4) with DDP.
+#
+#   vessl run create -f vessl/run_train.yaml -w
+#
+# Project #1: Differential Transformer + Multi-Token Prediction (KOGPT_ATTN=diff).
+# For project #2 (GPT-3/Llama/Qwen-style dense), set KOGPT_ATTN=gqa, KOGPT_MTP=1.
+#
+# Resume: /ckpt is a PERSISTENT volume. On the 120h Run cap or a SIGTERM the
+# trainer checkpoints and exits; relaunching this same Run auto-resumes.
+# ---------------------------------------------------------------------------
+name: kogpt-diff-medium
+description: 350M Korean Differential Transformer + MTP, from scratch, 4x3090 DDP
+
+resources:
+  cluster: yonsei-ai-gpu
+  preset: gpu-4
+
+image: quay.io/vessl-ai/torch:2.3.1-cuda12.1-r5
+
+import:
+  /root/koGPT:
+    git:
+      url: https://github.com/OHYUNSEO/koGPT   # TODO: your repo
+      ref: main
+  /data: volume://vessl-storage/kogpt-data     # tokenizer + .bin from step 1
+  /ckpt: volume://vessl-storage/kogpt-ckpt     # persistent checkpoints (resume)
+
+env:
+  KOGPT_LANG: ko
+  KOGPT_SIZE: medium       # warmup | medium | large
+  KOGPT_ATTN: diff         # diff (project #1) | gqa (project #2)
+  KOGPT_MTP: "2"           # predict t+1 and t+2 ; set 1 to disable MTP
+  KOGPT_BIN_DIR: /data/bin
+  KOGPT_TOK: /data/tok/kogpt_sp
+  KOGPT_CKPT_DIR: /ckpt
+  HF_DATASETS_CACHE: /data/hf_cache
+  OMP_NUM_THREADS: "8"
+
+run:
+  - workdir: /root/koGPT
+    command: |
+      pip install -r requirements.txt
+      torchrun --standalone --nproc_per_node=4 train.py

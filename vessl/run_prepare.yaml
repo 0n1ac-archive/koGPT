@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------------------
+# STEP 1 — Tokenizer + data prep (CPU-bound; do NOT waste 4 GPUs here).
+# Streams FineWeb-2 Korean, trains the SentencePiece tokenizer, and writes
+# train/val .bin into a PERSISTENT volume so the training Run can reuse them.
+#
+#   vessl run create -f vessl/run_prepare.yaml -w
+#
+# One-time volume creation (safe, no GPU) — run these first:
+#   vessl storage create-volume kogpt-data --storage-name vessl-storage
+#   vessl storage create-volume kogpt-ckpt --storage-name vessl-storage
+# If the volume:// mount syntax below is rejected, mount the same volume via
+# the web "New run" editor's "..." dialog on the /data folder (see manual p.19).
+# ---------------------------------------------------------------------------
+name: kogpt-prepare
+description: Train KO tokenizer + tokenize FineWeb-2 into train/val .bin
+
+resources:
+  cluster: yonsei-ai-gpu
+  preset: gpu-1            # tokenize is CPU work; 1 GPU is plenty
+
+image: quay.io/vessl-ai/torch:2.3.1-cuda12.1-r5
+
+import:
+  /root/koGPT:
+    git:
+      url: https://github.com/OHYUNSEO/koGPT   # TODO: your repo (manual: Github 연동)
+      ref: main
+  /data: volume://vessl-storage/kogpt-data     # persistent; shared with training
+
+env:
+  KOGPT_LANG: ko           # flip to "en" for the FineWeb-Edu fallback
+  KOGPT_BIN_DIR: /data/bin
+  KOGPT_TOK: /data/tok/kogpt_sp
+  HF_DATASETS_CACHE: /data/hf_cache
+
+run:
+  - workdir: /root/koGPT
+    command: |
+      pip install -r requirements.txt
+      python tokenizer/train_tokenizer.py
+      python data/prepare.py
